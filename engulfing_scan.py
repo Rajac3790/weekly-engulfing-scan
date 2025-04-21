@@ -2,14 +2,15 @@ import yfinance as yf
 import pandas as pd
 import requests
 import os
+from time import sleep
 
-# List of NSE Stocks (sample – you can add more)
+# List of NSE Stocks
 nse_stocks = [
     "3MINDIA.NS", "AARTIDRUGS.NS", "AARTIIND.NS", "AAVAS.NS", "ACCELYA.NS", "ACE.NS"
 ]
 
-timeframe = "1wk"  # Weekly candles
 
+# ========== ENGULFING CHECK ==========
 def is_engulfing(df):
     """Check for engulfing pattern in last 2 candles, excluding candles with large wicks"""
     if len(df) < 2:
@@ -43,39 +44,82 @@ def is_engulfing(df):
 
     return bullish, bearish
 
-def scan_stocks():
-    print("Downloading weekly data...")
+
+# ========== WEEKLY SCAN ==========
+def weekly_scan():
+    print("📥 Downloading weekly data...")
     data = yf.download(
         nse_stocks,
-        period="21d",  # 3 weeks to ensure 2 full candles
-        interval=timeframe,
+        period="21d",
+        interval="1wk",
         group_by='ticker',
         threads=True
     )
 
-    engulfing_stocks = []
+    results = []
 
     for stock in nse_stocks:
         try:
             df = data[stock].copy() if len(nse_stocks) > 1 else data.copy()
             df.dropna(inplace=True)
-
             if df.shape[0] < 2:
                 continue
 
-            last_two_weeks = df.tail(2)
-            bullish, bearish = is_engulfing(last_two_weeks)
+            bullish, bearish = is_engulfing(df.tail(2))
 
             if bullish or bearish:
-                pattern_date = last_two_weeks.index[-1].date()
                 pattern = "Weekly Bullish Engulfing" if bullish else "Weekly Bearish Engulfing"
-                engulfing_stocks.append((stock, pattern, pattern_date))
-
+                date = df.index[-1].date()
+                results.append(f"{stock}: {pattern} ({date})")
         except Exception as e:
             print(f"Error processing {stock}: {e}")
 
-    return engulfing_stocks
+    return results
 
+
+# ========== DAILY SCAN ==========
+def daily_scan():
+    print("📥 Downloading daily data...")
+    results = []
+    batch_size = 100
+
+    for i in range(0, len(nse_stocks), batch_size):
+        batch = nse_stocks[i:i + batch_size]
+        try:
+            data = yf.download(
+                batch,
+                period="5d",
+                interval="1d",
+                group_by="ticker",
+                threads=True,
+                progress=False
+            )
+        except Exception as e:
+            print(f"Download error for batch: {e}")
+            continue
+
+        for stock in batch:
+            try:
+                df = data[stock].copy() if len(batch) > 1 else data.copy()
+                df.dropna(inplace=True)
+                if len(df) < 2:
+                    continue
+
+                bullish, bearish = is_engulfing(df.tail(2))
+
+                if bullish or bearish:
+                    pattern = "Daily Bullish Engulfing" if bullish else "Daily Bearish Engulfing"
+                    date = df.index[-1].date()
+                    results.append(f"{stock}: {pattern} ({date})")
+            except Exception as e:
+                print(f"Error processing {stock}: {e}")
+
+        sleep(2)  # Be gentle with the API
+
+    return results
+
+
+# ========== TELEGRAM ALERT ==========
 def send_telegram_message(message):
     bot_token = os.getenv("BOT_TOKEN")
     chat_id = os.getenv("CHAT_ID")
@@ -84,22 +128,27 @@ def send_telegram_message(message):
         return
 
     url = f'https://api.telegram.org/bot{bot_token}/sendMessage'
-    payload = {
-        'chat_id': chat_id,
-        'text': message
-    }
+    payload = {'chat_id': chat_id, 'text': message}
     response = requests.post(url, data=payload)
     print(response.json())
 
-# Main runner
+
+# ========== MAIN RUNNER ==========
 if __name__ == "__main__":
-    engulfing_stocks = scan_stocks()
+    weekly_results = weekly_scan()
+    daily_results = daily_scan()
 
-    result_text = "\n".join([f"{stock}: {pattern} ({date})" for stock, pattern, date in engulfing_stocks])
-    print("Final result_text:")
-    print(result_text)
+    full_message = "📊 Engulfing Pattern Scan Results\n\n"
 
-    if result_text:
-        send_telegram_message(f"📈 Weekly Engulfing Scan Results:\n\n{result_text}")
+    if weekly_results:
+        full_message += "🗓️ *Weekly Patterns*\n" + "\n".join(weekly_results) + "\n\n"
     else:
-        send_telegram_message("✅ No Weekly Engulfing patterns found in previous weeks.")
+        full_message += "🗓️ Weekly: No patterns found.\n\n"
+
+    if daily_results:
+        full_message += "📆 *Daily Patterns*\n" + "\n".join(daily_results)
+    else:
+        full_message += "📆 Daily: No patterns found."
+
+    print(full_message)
+    send_telegram_message(full_message)
